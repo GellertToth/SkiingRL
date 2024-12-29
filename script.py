@@ -5,11 +5,13 @@ import ale_py
 import torch
 import torch.nn as nn
 import torch.optim as optim
+
 import torch.nn.functional as F
 import pickle
 import numpy as np
 import random
 from collections import namedtuple, deque
+import matplotlib.pyplot as plt
 import time
 gym.register_envs(ale_py)
 
@@ -55,20 +57,18 @@ class DQN(nn.Module):
     def __init__(self):
         super(DQN, self).__init__()
         self.double_conv1 = DoubleConv(channels=(3, 4, 8), kernel=(5,5), pool_kernel=(2,2))
-        self.double_conv2 = DoubleConv(channels=(8, 8, 16), kernel=(5,5), pool_kernel=(2,2))
-        self.double_conv3 = DoubleConv(channels=(16, 16, 32), kernel=(5,5), pool_kernel=(2,2))
-        self.double_conv4 = DoubleConv(channels=(32, 32, 64), kernel=(5,5), pool_kernel=(3,3))
+        self.double_conv2 = DoubleConv(channels=(8, 8, 16), kernel=(5,5), pool_kernel=(3,3))
 
 
-        self.layer1 = nn.Linear(192, 256)
+
+        self.layer1 = nn.Linear(144, 256)
         self.layer2 = nn.Linear(256, 256)
         self.layer3 = nn.Linear(256, 3)        
 
     def forward(self, x):
+        x = F.max_pool2d(x, (3,3))
         x = self.double_conv1(x)
         x = self.double_conv2(x)
-        x = self.double_conv3(x)
-        x = self.double_conv4(x)
         x = torch.flatten(x, x.dim()-3)
         x = F.relu(self.layer1(x))
         x = F.relu(self.layer2(x))
@@ -109,9 +109,29 @@ def optimize_model(optimizer, memory, policy_net, target_net):
         target_net_state_dict[key] = policy_net_state_dict[key]*TAU + target_net_state_dict[key]*(1-TAU)
     target_net.load_state_dict(target_net_state_dict)
 
+def truncate_picture(observation):
+    return observation[40:180, 10:-10, :]
+
+def find_pole_middle(observation):
+    for i in range(observation.shape[0]):
+        where = (observation[i, :, 0] < 100) & (observation[i, :, 1] < 100)
+        blue_pixels = sum(where)
+        if blue_pixels == 10:
+            return sum(np.where(where)[0])/10
+    return None
+
+def find_player_pos(observation):
+    for i in range(observation.shape[0]):
+        where = (observation[i, :, 1] < 100) & (observation[i, :, 2] < 100)
+        red_pixels = sum(where)
+        if red_pixels > 0:
+            return sum(np.where(where)[0])/red_pixels
+    return None
+
 def play_game(optimizer, memory, policy_net, target_net, MAX_ITER=1000):
     env = gym.make('ALE/Skiing-v5')
     obs, info = env.reset()
+    obs = truncate_picture(obs)
     obs = np.swapaxes(np.swapaxes(obs, 1, 2), 0, 1)
     done = False
     game_start = time.time()
@@ -124,14 +144,22 @@ def play_game(optimizer, memory, policy_net, target_net, MAX_ITER=1000):
             action = np.argmax(res)
         else:
             action = int(random.random()*A)
-        action_sum += (time.time()-s)
+        diff = time.time()-s
+        action_sum += (diff)
+        print(diff)
         action_cnt += 1
-        observation, reward, done, trunc, info = env.step(action)
+        for _ in range(ACTION_REPETITION):
+            observation, reward, done, trunc, info = env.step(action)
+            if done:
+                break
+        observation = truncate_picture(observation)
         observation = np.swapaxes(np.swapaxes(observation, 1, 2), 0, 1)
         memory.push((obs, action, reward, observation))
         obs = observation
 
     print(f"Game done in {time.time()-game_start}s, avg it length {action_sum/action_cnt}")
+
+    
 
 BATCH_SIZE = 128
 GAMMA = 0.95
@@ -141,13 +169,14 @@ EPSILON = 0.8
 A = 3
 MODEL_PATH = "./"
 MEMORY_PATH = "./memory"
+ACTION_REPETITION = 5
 
 
 target_net = DQN()
-# target_net.load_state_dict(torch.load(MODEL_PATH+"target", weights_only=True, map_location=torch.device('cpu')))
+target_net.load_state_dict(torch.load(MODEL_PATH+"target", weights_only=True, map_location=torch.device('cpu')))
 policy_net = DQN()
 policy_net.load_state_dict(target_net.state_dict())
-# policy_net.load_state_dict(torch.load(MODEL_PATH+"policy", weights_only=True, map_location=torch.device('cpu')))
+policy_net.load_state_dict(torch.load(MODEL_PATH+"policy", weights_only=True, map_location=torch.device('cpu')))
 
 
 
