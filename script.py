@@ -61,15 +61,16 @@ class DQN(nn.Module):
 
 
 
-        self.layer1 = nn.Linear(144, 256)
+        self.layer1 = nn.Linear(145, 256)
         self.layer2 = nn.Linear(256, 256)
         self.layer3 = nn.Linear(256, 3)        
 
-    def forward(self, x):
+    def forward(self, x, f):
         x = F.max_pool2d(x, (3,3))
         x = self.double_conv1(x)
         x = self.double_conv2(x)
         x = torch.flatten(x, x.dim()-3)
+        x = torch.cat((x, f), x.dim()-1)
         x = F.relu(self.layer1(x))
         x = F.relu(self.layer2(x))
         return self.layer3(x)
@@ -79,17 +80,21 @@ def optimize_model(optimizer, memory, policy_net, target_net):
     if len(memory) < BATCH_SIZE:
         return
     transitions = memory.sample(BATCH_SIZE)
-    state_batch = torch.tensor(np.array([state for (state, _, _, _) in transitions]), dtype=torch.float32)
-    action_batch = torch.tensor([[action] for (_, action, _, _,) in transitions])
-    reward_batch =  torch.tensor([reward for (_, _, reward, _) in transitions])
-    next_state_batch = torch.tensor(np.array([s2 for (_, _, _, s2) in transitions]), dtype=torch.float32)
+    state_batch = torch.tensor(np.array([state for (state, _, _, _, _, _) in transitions]), dtype=torch.float32)
+    feature_batch = torch.tensor(np.array([f for (_, f, _, _, _, _) in transitions]), dtype=torch.float32)
+
+    action_batch = torch.tensor([[action] for (_, _, action, _, _, _) in transitions])
+    reward_batch =  torch.tensor([reward for (_, _, _, reward, _, _) in transitions])
+    next_state_batch = torch.tensor(np.array([s2 for (_, _, _, _, s2, _) in transitions]), dtype=torch.float32)
+    next_feature_batch = torch.tensor(np.array([f for (_, _, _, _, _, f) in transitions]), dtype=torch.float32)
 
 
-    state_qvalues = policy_net(state_batch)
+
+    state_qvalues = policy_net(state_batch, feature_batch)
     state_action_values = state_qvalues.squeeze(1).gather(1, action_batch).squeeze(1)
 
     with torch.no_grad():
-        next_qvalues = target_net(next_state_batch).squeeze(1)
+        next_qvalues = target_net(next_state_batch, next_feature_batch).squeeze(1)
         next_state_values = next_qvalues.max(axis=1).values
         next_state_values = torch.tensor(next_state_values)
     expected_state_action_values = (next_state_values * GAMMA) + reward_batch
@@ -128,10 +133,18 @@ def find_player_pos(observation):
             return sum(np.where(where)[0])/red_pixels
     return None
 
+def extract_extra_features(observation):
+    pole = find_pole_middle(observation)
+    player = find_player_pos(observation)
+    delta = (pole-player)/observation.shape[1]
+    return [delta]
+
+
 def play_game(optimizer, memory, policy_net, target_net, MAX_ITER=1000):
     env = gym.make('ALE/Skiing-v5')
     obs, info = env.reset()
     obs = truncate_picture(obs)
+    last_features = extract_extra_features(obs)
     obs = np.swapaxes(np.swapaxes(obs, 1, 2), 0, 1)
     done = False
     game_start = time.time()
@@ -140,7 +153,7 @@ def play_game(optimizer, memory, policy_net, target_net, MAX_ITER=1000):
         s = time.time()
         optimize_model(optimizer, memory, policy_net, target_net)
         if random.random() < EPSILON:
-            res = target_net(torch.tensor(obs, dtype=torch.float32)).detach().numpy()
+            res = target_net(torch.tensor(obs, dtype=torch.float32), torch.tensor(last_features, dtype=torch.float32)).detach().numpy()
             action = np.argmax(res)
         else:
             action = int(random.random()*A)
@@ -153,11 +166,16 @@ def play_game(optimizer, memory, policy_net, target_net, MAX_ITER=1000):
             if done:
                 break
         observation = truncate_picture(observation)
+        features = extract_extra_features(observation)
         observation = np.swapaxes(np.swapaxes(observation, 1, 2), 0, 1)
-        memory.push((obs, action, reward, observation))
+        memory.push((obs, last_features, action, reward, observation, features))
         obs = observation
+        last_features = features
 
     print(f"Game done in {time.time()-game_start}s, avg it length {action_sum/action_cnt}")
+
+    
+
 
     
 
