@@ -1,3 +1,4 @@
+# %%
 import gymnasium as gym
 import ale_py
 # pip install ale-py
@@ -15,6 +16,7 @@ import matplotlib.pyplot as plt
 import time
 gym.register_envs(ale_py)
 
+# %%
 class Memory():
     def __init__(self, capacity, file=None):
         if file is not None:
@@ -39,7 +41,8 @@ class Memory():
 
     def to_list(self):
         return list(self.memory)
-    
+
+# %%
 class DoubleConv(nn.Module):
     def __init__(self, channels, kernel, pool_kernel):
         super(DoubleConv, self).__init__()
@@ -56,16 +59,19 @@ class DoubleConv(nn.Module):
 class DQN(nn.Module):
     def __init__(self):
         super(DQN, self).__init__()
-        self.double_conv1 = DoubleConv(channels=(3, 4, 8), kernel=(5,5), pool_kernel=(2,2))
-        self.double_conv2 = DoubleConv(channels=(8, 8, 16), kernel=(5,5), pool_kernel=(3,3))
+        
+        self.double_conv1 = DoubleConv(channels=(3, 4, 8), kernel=(5,5), pool_kernel=(3,3))
+        self.double_conv2 = DoubleConv(channels=(8, 8, 16), kernel=(4,4), pool_kernel=(3,3))
+        
 
 
 
-        self.layer1 = nn.Linear(145, 256)
-        self.layer2 = nn.Linear(256, 256)
-        self.layer3 = nn.Linear(256, 3)        
+        self.layer1 = nn.Linear(69, 64)
+        self.layer2 = nn.Linear(64, 64)
+        self.layer3 = nn.Linear(64, 3)        
 
     def forward(self, x, f):
+        
         x = F.max_pool2d(x, (3,3))
         x = self.double_conv1(x)
         x = self.double_conv2(x)
@@ -114,6 +120,7 @@ def optimize_model(optimizer, memory, policy_net, target_net):
         target_net_state_dict[key] = policy_net_state_dict[key]*TAU + target_net_state_dict[key]*(1-TAU)
     target_net.load_state_dict(target_net_state_dict)
 
+# %%
 def truncate_picture(observation):
     return observation[40:180, 10:-10, :]
 
@@ -122,7 +129,7 @@ def find_pole_middle(observation):
         where = (observation[i, :, 0] < 100) & (observation[i, :, 1] < 100)
         blue_pixels = sum(where)
         if blue_pixels == 10:
-            return sum(np.where(where)[0])/10
+            return (i, sum(np.where(where)[0])/10)
     return None
 
 def find_player_pos(observation):
@@ -133,18 +140,56 @@ def find_player_pos(observation):
             return sum(np.where(where)[0])/red_pixels
     return None
 
-def extract_extra_features(observation):
+def find_all_trees(observation):
+    trees = []
+    continous = False
+    for i in range(observation.shape[0]):
+        where = (observation[i, :, 0] < 100) & (observation[i, :, 2] < 100)
+        green_pixels = sum(where)
+        if green_pixels > 0 and not continous:
+            continous = True
+            trees.append((i, sum(np.where(where)[0])/green_pixels))
+        if green_pixels == 0:
+            continous = False
+    return trees
+
+# %%
+def extract_extra_features(observation, last_speed):
     pole = find_pole_middle(observation)
     player = find_player_pos(observation)
-    delta = (pole-player)/observation.shape[1]
-    return [delta]
+    if pole is not None:
+        y_delta = pole[0] / observation.shape[0]
+        x_delta = (pole[1]-player)/observation.shape[1]
+    else:
+        y_delta, x_delta = 1, 0
+    trees = find_all_trees(observation)
+    trees = [(y/observation.shape[0], (x-player)/observation.shape[1]) for (x,y) in trees]
+    if len(trees) == 0:
+        trees.append((1, 1))
+    return [y_delta, x_delta, trees[0][0], trees[0][1], 1/(last_speed+1)]
+
+def get_reward(old_observation, current_observation):
+    if old_observation.shape[0] == 3:
+        old_observation = np.swapaxes(np.swapaxes(old_observation, 0, 1), 1, 2)
+    if current_observation.shape[0] == 3:
+        current_observation = np.swapaxes(np.swapaxes(current_observation, 0, 1), 1, 2)
+    old_pole = find_pole_middle(old_observation)
+    new_pole = find_pole_middle(current_observation)
+    if new_pole is None or old_pole is None:
+        return 0
+    if new_pole[0] < old_pole[0]:
+        return old_pole[0] - new_pole[0]
+    return 0
 
 
+# %%
 def play_game(optimizer, memory, policy_net, target_net, MAX_ITER=1000):
     env = gym.make('ALE/Skiing-v5')
     obs, info = env.reset()
+    reward_sum = 0
+    last_speed = 0
     obs = truncate_picture(obs)
-    last_features = extract_extra_features(obs)
+    last_features = extract_extra_features(obs, last_speed)
     obs = np.swapaxes(np.swapaxes(obs, 1, 2), 0, 1)
     done = False
     game_start = time.time()
@@ -159,26 +204,27 @@ def play_game(optimizer, memory, policy_net, target_net, MAX_ITER=1000):
             action = int(random.random()*A)
         diff = time.time()-s
         action_sum += (diff)
-        print(diff)
         action_cnt += 1
         for _ in range(ACTION_REPETITION):
             observation, reward, done, trunc, info = env.step(action)
             if done:
                 break
         observation = truncate_picture(observation)
-        features = extract_extra_features(observation)
+        features = extract_extra_features(observation, last_speed)
         observation = np.swapaxes(np.swapaxes(observation, 1, 2), 0, 1)
+        reward = get_reward(obs, observation)
+        reward_sum += reward
         memory.push((obs, last_features, action, reward, observation, features))
         obs = observation
         last_features = features
+        last_speed = reward
 
-    print(f"Game done in {time.time()-game_start}s, avg it length {action_sum/action_cnt}")
-
-    
-
+    print(f"Game done in {time.time()-game_start}s, avg it length {action_sum/action_cnt}, avg reward {reward_sum/action_cnt}")
 
     
 
+
+# %%
 BATCH_SIZE = 128
 GAMMA = 0.95
 TAU = 0.005
@@ -187,23 +233,27 @@ EPSILON = 0.8
 A = 3
 MODEL_PATH = "./"
 MEMORY_PATH = "./memory"
-ACTION_REPETITION = 5
+ACTION_REPETITION = 3
 
 
 target_net = DQN()
-target_net.load_state_dict(torch.load(MODEL_PATH+"target", weights_only=True, map_location=torch.device('cpu')))
+# target_net.load_state_dict(torch.load(MODEL_PATH+"target", weights_only=True, map_location=torch.device('cpu')))
 policy_net = DQN()
 policy_net.load_state_dict(target_net.state_dict())
-policy_net.load_state_dict(torch.load(MODEL_PATH+"policy", weights_only=True, map_location=torch.device('cpu')))
+# policy_net.load_state_dict(torch.load(MODEL_PATH+"policy", weights_only=True, map_location=torch.device('cpu')))
 
 
 
 memory = Memory(10**5, file=MEMORY_PATH)
 optimizer = optim.AdamW(policy_net.parameters(), lr=LR, amsgrad=True)
 
+# %%
 while True:
     play_game(optimizer, memory, policy_net, target_net)
     torch.save(target_net.state_dict(), MODEL_PATH+"target")
     torch.save(policy_net.state_dict(), MODEL_PATH+"policy")
     with open(MEMORY_PATH, 'wb') as f:
         pickle.dump(memory.memory, f)
+
+
+
