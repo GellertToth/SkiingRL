@@ -61,17 +61,13 @@ class DQN(nn.Module):
         super(DQN, self).__init__()
         
         self.double_conv1 = DoubleConv(channels=(3, 4, 8), kernel=(5,5), pool_kernel=(3,3))
-        self.double_conv2 = DoubleConv(channels=(8, 8, 16), kernel=(4,4), pool_kernel=(3,3))
-        
+        self.double_conv2 = DoubleConv(channels=(8, 8, 16), kernel=(5,5), pool_kernel=(3,3))
 
-
-
-        self.layer1 = nn.Linear(69, 64)
+        self.layer1 = nn.Linear(21, 64)
         self.layer2 = nn.Linear(64, 64)
         self.layer3 = nn.Linear(64, 3)        
 
     def forward(self, x, f):
-        
         x = F.max_pool2d(x, (3,3))
         x = self.double_conv1(x)
         x = self.double_conv2(x)
@@ -86,13 +82,13 @@ def optimize_model(optimizer, memory, policy_net, target_net):
     if len(memory) < BATCH_SIZE:
         return
     transitions = memory.sample(BATCH_SIZE)
-    state_batch = torch.tensor(np.array([state for (state, _, _, _, _, _) in transitions]), dtype=torch.float32)
-    feature_batch = torch.tensor(np.array([f for (_, f, _, _, _, _) in transitions]), dtype=torch.float32)
+    state_batch = torch.tensor(np.array([state for (state, _, _, _, _, _) in transitions]), dtype=torch.float32, device="cuda")
+    feature_batch = torch.tensor(np.array([f for (_, f, _, _, _, _) in transitions]), dtype=torch.float32, device="cuda")
 
-    action_batch = torch.tensor([[action] for (_, _, action, _, _, _) in transitions])
-    reward_batch =  torch.tensor([reward for (_, _, _, reward, _, _) in transitions])
-    next_state_batch = torch.tensor(np.array([s2 for (_, _, _, _, s2, _) in transitions]), dtype=torch.float32)
-    next_feature_batch = torch.tensor(np.array([f for (_, _, _, _, _, f) in transitions]), dtype=torch.float32)
+    action_batch = torch.tensor([[action] for (_, _, action, _, _, _) in transitions], device="cuda")
+    reward_batch =  torch.tensor([reward for (_, _, _, reward, _, _) in transitions], device="cuda")
+    next_state_batch = torch.tensor(np.array([s2 for (_, _, _, _, s2, _) in transitions]), dtype=torch.float32, device="cuda")
+    next_feature_batch = torch.tensor(np.array([f for (_, _, _, _, _, f) in transitions]), dtype=torch.float32, device="cuda")
 
 
 
@@ -122,19 +118,19 @@ def optimize_model(optimizer, memory, policy_net, target_net):
 
 # %%
 def truncate_picture(observation):
-    return observation[40:180, 10:-10, :]
+    return observation[:, 40:180, 10:-10]
 
 def find_pole_middle(observation):
-    for i in range(observation.shape[0]):
-        where = (observation[i, :, 0] < 100) & (observation[i, :, 1] < 100)
+    for i in range(observation.shape[1]):
+        where = (observation[0, i, :] < 100) & (observation[1, i, :] < 100)
         blue_pixels = sum(where)
         if blue_pixels == 10:
             return (i, sum(np.where(where)[0])/10)
     return None
 
 def find_player_pos(observation):
-    for i in range(observation.shape[0]):
-        where = (observation[i, :, 1] < 100) & (observation[i, :, 2] < 100)
+    for i in range(observation.shape[1]):
+        where = (observation[1, i, :] < 100) & (observation[2, i, :] < 100)
         red_pixels = sum(where)
         if red_pixels > 0:
             return sum(np.where(where)[0])/red_pixels
@@ -143,8 +139,8 @@ def find_player_pos(observation):
 def find_all_trees(observation):
     trees = []
     continous = False
-    for i in range(observation.shape[0]):
-        where = (observation[i, :, 0] < 100) & (observation[i, :, 2] < 100)
+    for i in range(observation.shape[1]):
+        where = (observation[0, i, :] < 100) & (observation[2, i, :] < 100)
         green_pixels = sum(where)
         if green_pixels > 0 and not continous:
             continous = True
@@ -154,7 +150,17 @@ def find_all_trees(observation):
     return trees
 
 # %%
-def extract_extra_features(observation, last_speed):
+def get_distance_travelled(old, new):
+    old_pole = find_pole_middle(old)
+    new_pole = find_pole_middle(new)
+    if new_pole is None or old_pole is None:
+        return 0
+    dist = max(old_pole[0] - new_pole[0], 0)
+    if dist > 50:
+        dist = 0
+    return dist
+
+def extract_extra_features(observation, old_observation):
     pole = find_pole_middle(observation)
     player = find_player_pos(observation)
     if pole is not None:
@@ -166,39 +172,35 @@ def extract_extra_features(observation, last_speed):
     trees = [(y/observation.shape[0], (x-player)/observation.shape[1]) for (x,y) in trees]
     if len(trees) == 0:
         trees.append((1, 1))
-    return [y_delta, x_delta, trees[0][0], trees[0][1], 1/(last_speed+1)]
+    dist = get_distance_travelled(old_observation, observation)
+    return [y_delta, x_delta, trees[0][0], trees[0][1], 1/(dist+1)]
 
 def get_reward(old_observation, current_observation):
-    if old_observation.shape[0] == 3:
-        old_observation = np.swapaxes(np.swapaxes(old_observation, 0, 1), 1, 2)
-    if current_observation.shape[0] == 3:
-        current_observation = np.swapaxes(np.swapaxes(current_observation, 0, 1), 1, 2)
-    old_pole = find_pole_middle(old_observation)
+    reward = get_distance_travelled(old_observation, current_observation)
+
+    player_pos = find_player_pos(current_observation)
     new_pole = find_pole_middle(current_observation)
-    if new_pole is None or old_pole is None:
-        return 0
-    if new_pole[0] < old_pole[0]:
-        return old_pole[0] - new_pole[0]
-    return 0
+    if new_pole is not None and new_pole[0] < 5 and abs(new_pole[1] - player_pos) < 12:
+        reward += 20
+    return reward
 
 
 # %%
 def play_game(optimizer, memory, policy_net, target_net, MAX_ITER=1000):
     env = gym.make('ALE/Skiing-v5')
     obs, info = env.reset()
-    reward_sum = 0
-    last_speed = 0
-    obs = truncate_picture(obs)
-    last_features = extract_extra_features(obs, last_speed)
     obs = np.swapaxes(np.swapaxes(obs, 1, 2), 0, 1)
+    obs = truncate_picture(obs)
+    last_features = extract_extra_features(obs, obs)
     done = False
     game_start = time.time()
     action_sum, action_cnt = 0, 0
+    reward_sum = 0
     while not done and action_cnt < MAX_ITER:
         s = time.time()
         optimize_model(optimizer, memory, policy_net, target_net)
         if random.random() < EPSILON:
-            res = target_net(torch.tensor(obs, dtype=torch.float32), torch.tensor(last_features, dtype=torch.float32)).detach().numpy()
+            res = target_net(torch.tensor(obs, dtype=torch.float32, device="cuda"), torch.tensor(last_features, dtype=torch.float32, device="cuda")).cpu().detach().numpy()
             action = np.argmax(res)
         else:
             action = int(random.random()*A)
@@ -209,15 +211,14 @@ def play_game(optimizer, memory, policy_net, target_net, MAX_ITER=1000):
             observation, reward, done, trunc, info = env.step(action)
             if done:
                 break
-        observation = truncate_picture(observation)
-        features = extract_extra_features(observation, last_speed)
         observation = np.swapaxes(np.swapaxes(observation, 1, 2), 0, 1)
+        observation = truncate_picture(observation)
+        features = extract_extra_features(observation, obs)
         reward = get_reward(obs, observation)
         reward_sum += reward
         memory.push((obs, last_features, action, reward, observation, features))
         obs = observation
         last_features = features
-        last_speed = reward
 
     print(f"Game done in {time.time()-game_start}s, avg it length {action_sum/action_cnt}, avg reward {reward_sum/action_cnt}")
 
@@ -237,11 +238,12 @@ ACTION_REPETITION = 3
 
 
 target_net = DQN()
-# target_net.load_state_dict(torch.load(MODEL_PATH+"target", weights_only=True, map_location=torch.device('cpu')))
+target_net.load_state_dict(torch.load(MODEL_PATH+"target", weights_only=True, map_location=torch.device('cuda')))
+target_net.to("cuda")
 policy_net = DQN()
 policy_net.load_state_dict(target_net.state_dict())
-# policy_net.load_state_dict(torch.load(MODEL_PATH+"policy", weights_only=True, map_location=torch.device('cpu')))
-
+policy_net.load_state_dict(torch.load(MODEL_PATH+"policy", weights_only=True, map_location=torch.device('cuda')))
+policy_net.to("cuda")
 
 
 memory = Memory(10**5, file=MEMORY_PATH)
@@ -254,6 +256,7 @@ while True:
     torch.save(policy_net.state_dict(), MODEL_PATH+"policy")
     with open(MEMORY_PATH, 'wb') as f:
         pickle.dump(memory.memory, f)
+
 
 
 

@@ -33,14 +33,12 @@ class DQN(nn.Module):
         super(DQN, self).__init__()
         
         self.double_conv1 = DoubleConv(channels=(3, 4, 8), kernel=(5,5), pool_kernel=(3,3))
-        self.double_conv2 = DoubleConv(channels=(8, 8, 16), kernel=(4,4), pool_kernel=(3,3))
-        
+        self.double_conv2 = DoubleConv(channels=(8, 8, 16), kernel=(5,5), pool_kernel=(3,3))
 
-
-
-        self.layer1 = nn.Linear(68, 64)
+        self.layer1 = nn.Linear(21, 64)
         self.layer2 = nn.Linear(64, 64)
-        self.layer3 = nn.Linear(64, 3)        
+        self.layer3 = nn.Linear(64, 3)     
+      
 
     def forward(self, x, f):
         
@@ -56,17 +54,20 @@ class DQN(nn.Module):
 def truncate_picture(observation):
     return observation[40:180, 10:-10, :]
 
+def truncate_picture(observation):
+    return observation[:, 40:180, 10:-10]
+
 def find_pole_middle(observation):
-    for i in range(observation.shape[0]):
-        where = (observation[i, :, 0] < 100) & (observation[i, :, 1] < 100)
+    for i in range(observation.shape[1]):
+        where = (observation[0, i, :] < 100) & (observation[1, i, :] < 100)
         blue_pixels = sum(where)
         if blue_pixels == 10:
             return (i, sum(np.where(where)[0])/10)
     return None
 
 def find_player_pos(observation):
-    for i in range(observation.shape[0]):
-        where = (observation[i, :, 1] < 100) & (observation[i, :, 2] < 100)
+    for i in range(observation.shape[1]):
+        where = (observation[1, i, :] < 100) & (observation[2, i, :] < 100)
         red_pixels = sum(where)
         if red_pixels > 0:
             return sum(np.where(where)[0])/red_pixels
@@ -75,8 +76,8 @@ def find_player_pos(observation):
 def find_all_trees(observation):
     trees = []
     continous = False
-    for i in range(observation.shape[0]):
-        where = (observation[i, :, 0] < 100) & (observation[i, :, 2] < 100)
+    for i in range(observation.shape[1]):
+        where = (observation[0, i, :] < 100) & (observation[2, i, :] < 100)
         green_pixels = sum(where)
         if green_pixels > 0 and not continous:
             continous = True
@@ -86,7 +87,14 @@ def find_all_trees(observation):
     return trees
 
 
-def extract_extra_features(observation):
+def get_distance_travelled(old, new):
+    old_pole = find_pole_middle(old)
+    new_pole = find_pole_middle(new)
+    if new_pole is None or old_pole is None:
+        return 0
+    return max(old_pole[0] - new_pole[0], 0)
+
+def extract_extra_features(observation, old_observation):
     pole = find_pole_middle(observation)
     player = find_player_pos(observation)
     if pole is not None:
@@ -98,27 +106,24 @@ def extract_extra_features(observation):
     trees = [(y/observation.shape[0], (x-player)/observation.shape[1]) for (x,y) in trees]
     if len(trees) == 0:
         trees.append((1, 1))
-    return [y_delta, x_delta, trees[0][0], trees[0][1]]
+    dist = get_distance_travelled(old_observation, observation)
+    return [y_delta, x_delta, trees[0][0], trees[0][1], 1/(dist+1)]
 
 def get_reward(old_observation, current_observation):
-    if old_observation.shape[0] == 3:
-        old_observation = np.swapaxes(np.swapaxes(old_observation, 0, 1), 1, 2)
-    if current_observation.shape[0] == 3:
-        current_observation = np.swapaxes(np.swapaxes(current_observation, 0, 1), 1, 2)
-    old_pole = find_pole_middle(old_observation)
+    reward = get_distance_travelled(old_observation, current_observation)
+
+    player_pos = find_player_pos(current_observation)
     new_pole = find_pole_middle(current_observation)
-    if new_pole is None or old_pole is None:
-        return 0
-    if new_pole[0] < old_pole[0]:
-        return old_pole[0] - new_pole[0]
-    return 0
+    if new_pole is not None and new_pole[0] < 5 and abs(new_pole[1] - player_pos) < 12:
+        reward += (2**8)
+    return reward
 
 def play_game(target_net, MAX_ITER=1000):
     env = gym.make('ALE/Skiing-v5', render_mode="human")
     obs, info = env.reset()
-    obs = truncate_picture(obs)
-    last_features = extract_extra_features(obs)
     obs = np.swapaxes(np.swapaxes(obs, 1, 2), 0, 1)
+    obs = truncate_picture(obs)
+    last_features = extract_extra_features(obs, obs)
     done = False
     game_start = time.time()
     action_sum, action_cnt = 0, 0
@@ -138,10 +143,11 @@ def play_game(target_net, MAX_ITER=1000):
             observation, reward, done, trunc, info = env.step(action)
             if done:
                 break
-        observation = truncate_picture(observation)
-        features = extract_extra_features(observation)
         observation = np.swapaxes(np.swapaxes(observation, 1, 2), 0, 1)
+        observation = truncate_picture(observation)
+        features = extract_extra_features(observation, obs)
         reward = get_reward(obs, observation)
+        print(reward)
         reward_sum += reward
         obs = observation
         last_features = features
