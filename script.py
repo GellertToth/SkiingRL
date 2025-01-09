@@ -77,7 +77,6 @@ class DQN(nn.Module):
         x = F.relu(self.layer2(x))
         return self.layer3(x)
 
-
 def optimize_model(optimizer, memory, policy_net, target_net):
     if len(memory) < BATCH_SIZE:
         return
@@ -116,9 +115,25 @@ def optimize_model(optimizer, memory, policy_net, target_net):
         target_net_state_dict[key] = policy_net_state_dict[key]*TAU + target_net_state_dict[key]*(1-TAU)
     target_net.load_state_dict(target_net_state_dict)
 
-# %%
+
 def truncate_picture(observation):
     return observation[:, 40:180, 10:-10]
+
+
+def find_gate(observation):
+    poles = []
+    for i in range(observation.shape[1]):
+        where = (observation[0, i, :] < 100) & (observation[1, i, :] < 100)
+        blue_pixels = sum(where)
+        if blue_pixels == 10: 
+            pole_x = sum(np.where(where)[0]) / 10
+            poles.append((i, pole_x))
+
+    gates = []
+    for j in range(len(poles) - 1):
+        if abs(poles[j][1] - poles[j + 1][1]) > 15:
+            gates.append((poles[j], poles[j + 1]))
+    return gates
 
 def find_pole_middle(observation):
     for i in range(observation.shape[1]):
@@ -180,8 +195,18 @@ def get_reward(old_observation, current_observation):
 
     player_pos = find_player_pos(current_observation)
     new_pole = find_pole_middle(current_observation)
+
     if new_pole is not None and new_pole[0] < 5 and abs(new_pole[1] - player_pos) < 12:
         reward += 20
+
+    gates = find_gate(current_observation)
+
+    for gate in gates:
+        left_pole, right_pole = gate
+        if left_pole[1] < player_pos < right_pole[1]:
+            reward += 500
+            break
+
     return reward
 
 
@@ -238,11 +263,11 @@ ACTION_REPETITION = 3
 
 
 target_net = DQN()
-target_net.load_state_dict(torch.load(MODEL_PATH+"target", weights_only=True, map_location=torch.device('cuda')))
+target_net.load_state_dict(torch.load(MODEL_PATH+"target", map_location=torch.device('cuda')))
 target_net.to("cuda")
 policy_net = DQN()
 policy_net.load_state_dict(target_net.state_dict())
-policy_net.load_state_dict(torch.load(MODEL_PATH+"policy", weights_only=True, map_location=torch.device('cuda')))
+policy_net.load_state_dict(torch.load(MODEL_PATH+"policy", map_location=torch.device('cuda')))
 policy_net.to("cuda")
 
 
@@ -256,7 +281,5 @@ while True:
     torch.save(policy_net.state_dict(), MODEL_PATH+"policy")
     with open(MEMORY_PATH, 'wb') as f:
         pickle.dump(memory.memory, f)
-
-
 
 
