@@ -73,6 +73,21 @@ def find_player_pos(observation):
             return sum(np.where(where)[0])/red_pixels
     return None
 
+def find_gate(observation):
+    poles = []
+    for i in range(observation.shape[1]):
+        where = (observation[0, i, :] < 100) & (observation[1, i, :] < 100)
+        blue_pixels = sum(where)
+        if blue_pixels == 10:
+            pole_x = sum(np.where(where)[0]) / 10
+            poles.append((i, pole_x))
+
+    gates = []
+    for j in range(len(poles) - 1):
+        if abs(poles[j][1] - poles[j + 1][1]) > 15:
+            gates.append((poles[j], poles[j + 1]))
+    return gates
+
 def find_all_trees(observation):
     trees = []
     continous = False
@@ -116,6 +131,16 @@ def get_reward(old_observation, current_observation):
     new_pole = find_pole_middle(current_observation)
     if new_pole is not None and new_pole[0] < 5 and abs(new_pole[1] - player_pos) < 12:
         reward += (2**8)
+
+    gates = find_gate(current_observation)
+
+    for gate in gates:
+        left_pole, right_pole = gate
+        if left_pole[1] < player_pos < right_pole[1]:
+            reward += 500
+            break
+
+
     return reward
 
 def play_game(target_net, MAX_ITER=1000):
@@ -158,5 +183,5 @@ MODEL_PATH = "./"
 EPSILON = 0.8
 A = 3
 target_net = DQN()
-target_net.load_state_dict(torch.load(MODEL_PATH+"target", weights_only=True, map_location=torch.device('cpu')))
+target_net.load_state_dict(torch.load(MODEL_PATH+"target", map_location=torch.device('cpu')))
 play_game(target_net)
