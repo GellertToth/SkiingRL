@@ -13,7 +13,7 @@ from collections import namedtuple, deque
 import time
 gym.register_envs(ale_py)
 
-ACTION_REPETITION = 3
+ACTION_REPETITION = 1
 
 class DoubleConv(nn.Module):
     def __init__(self, channels, kernel, pool_kernel):
@@ -32,27 +32,23 @@ class DQN(nn.Module):
     def __init__(self):
         super(DQN, self).__init__()
         
-        self.double_conv1 = DoubleConv(channels=(3, 4, 8), kernel=(5,5), pool_kernel=(3,3))
+        """self.double_conv1 = DoubleConv(channels=(3, 4, 8), kernel=(5,5), pool_kernel=(3,3))
         self.double_conv2 = DoubleConv(channels=(8, 8, 16), kernel=(5,5), pool_kernel=(3,3))
-
-        self.layer1 = nn.Linear(21, 64)
+        """
+        self.layer1 = nn.Linear(6, 64)
         self.layer2 = nn.Linear(64, 64)
         self.layer3 = nn.Linear(64, 3)     
       
 
-    def forward(self, x, f):
-        
-        x = F.max_pool2d(x, (3,3))
+    def forward(self, x): 
+        """x = F.max_pool2d(x, (3,3))
         x = self.double_conv1(x)
         x = self.double_conv2(x)
         x = torch.flatten(x, x.dim()-3)
-        x = torch.cat((x, f), x.dim()-1)
+        x = torch.cat((x, f), x.dim()-1)"""
         x = F.relu(self.layer1(x))
         x = F.relu(self.layer2(x))
         return self.layer3(x)
-
-def truncate_picture(observation):
-    return observation[40:180, 10:-10, :]
 
 def truncate_picture(observation):
     return observation[:, 40:180, 10:-10]
@@ -94,7 +90,7 @@ def get_distance_travelled(old, new):
         return 0
     return max(old_pole[0] - new_pole[0], 0)
 
-def extract_extra_features(observation, old_observation):
+def extract_extra_features(observation, old_observation, turn_delta):
     pole = find_pole_middle(observation)
     player = find_player_pos(observation)
     if pole is not None:
@@ -107,7 +103,7 @@ def extract_extra_features(observation, old_observation):
     if len(trees) == 0:
         trees.append((1, 1))
     dist = get_distance_travelled(old_observation, observation)
-    return [y_delta, x_delta, trees[0][0], trees[0][1], 1/(dist+1)]
+    return [y_delta, x_delta, trees[0][0], trees[0][1], 1/(dist+1), turn_delta/MAX_TURN]
 
 def get_reward(old_observation, current_observation):
     reward = get_distance_travelled(old_observation, current_observation)
@@ -118,21 +114,30 @@ def get_reward(old_observation, current_observation):
         reward += (2**8)
     return reward
 
+MAX_TURN = 9
+
 def play_game(target_net, MAX_ITER=1000):
     env = gym.make('ALE/Skiing-v5', render_mode="human")
     obs, info = env.reset()
     obs = np.swapaxes(np.swapaxes(obs, 1, 2), 0, 1)
     obs = truncate_picture(obs)
-    last_features = extract_extra_features(obs, obs)
+    turn_delta = 0
+    last_features = extract_extra_features(obs, obs, turn_delta)
     done = False
     game_start = time.time()
     action_sum, action_cnt = 0, 0
     reward_sum = 0
+    last_rewards = [10**9 for _ in range(10)]
     while not done and action_cnt < MAX_ITER:
         env.render()
         s = time.time()
-        if random.random() < EPSILON:
-            res = target_net(torch.tensor(obs, dtype=torch.float32), torch.tensor(last_features, dtype=torch.float32)).detach().numpy()
+        if turn_delta == MAX_TURN:
+            action = 1
+        elif turn_delta == -MAX_TURN:
+            action = 2
+        elif random.random() < EPSILON:
+            # torch.tensor(obs, dtype=torch.float32), 
+            res = target_net(torch.tensor(last_features, dtype=torch.float32)).detach().numpy()
             action = np.argmax(res)
         else:
             action = int(random.random()*A)
@@ -141,13 +146,18 @@ def play_game(target_net, MAX_ITER=1000):
         action_cnt += 1
         for _ in range(ACTION_REPETITION):
             observation, reward, done, trunc, info = env.step(action)
+            if action == 2:
+                turn_delta = min(turn_delta + 1, MAX_TURN)
+            elif action == 1:
+                turn_delta = max(turn_delta - 1, -MAX_TURN)
             if done:
                 break
         observation = np.swapaxes(np.swapaxes(observation, 1, 2), 0, 1)
         observation = truncate_picture(observation)
-        features = extract_extra_features(observation, obs)
+        features = extract_extra_features(observation, obs, turn_delta)
         reward = get_reward(obs, observation)
-        print(reward)
+        print(turn_delta, features, reward)
+        last_rewards.append(reward)
         reward_sum += reward
         obs = observation
         last_features = features
